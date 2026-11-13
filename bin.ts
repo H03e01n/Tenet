@@ -15,6 +15,7 @@ interface Options {
   mode: Mode;
   inputs: string[];
   output: string;
+  bin: string | null;
   limit: number | null;
   concurrency: number;
   timeout: number;
@@ -32,6 +33,7 @@ const options: Options = {
   mode: "sing-box",
   inputs: [],
   output: "",
+  bin: null,
   limit: null,
   concurrency: DEFAULT_CONCURRENCY,
   timeout: DEFAULT_TIMEOUT,
@@ -63,16 +65,13 @@ const kleur = {
 let failedCount = 0;
 
 const log = {
-  info: (msg: string) =>
-    console.log(`${kleur.cyan}  ·${kleur.reset} ${msg}`),
-  ok: (msg: string) =>
-    console.log(`${kleur.green}  ok${kleur.reset} ${msg}`),
+  info: (msg: string) => console.log(`${kleur.cyan}  ·${kleur.reset} ${msg}`),
+  ok: (msg: string) => console.log(`${kleur.green}  ok${kleur.reset} ${msg}`),
   success: (msg: string) =>
     console.log(`${kleur.green}  ok${kleur.reset} ${msg}`),
   warn: (msg: string) =>
     console.log(`${kleur.yellow}  !!${kleur.reset} ${msg}`),
-  error: (msg: string) =>
-    console.log(`${kleur.red}  xx${kleur.reset} ${msg}`),
+  error: (msg: string) => console.log(`${kleur.red}  xx${kleur.reset} ${msg}`),
   step: (msg: string) =>
     console.log(`${kleur.bold}${kleur.cyan}==>${kleur.reset} ${msg}`),
   verbose: (msg: string) => {
@@ -116,6 +115,7 @@ ${kleur.bold}Options:${kleur.reset}
   -n, --limit <number>      Maximum successful nodes (triggers early stopping)
   -c, --concurrency <n>     Parallel tests (default: ${DEFAULT_CONCURRENCY})
   -o, --output <file>       Output filename
+      --bin <path>          Custom core binary path (overrides auto-detection)
   -t, --timeout <ms>        Per-node location timeout
   -e, --exec                Execute the binary immediately with generated config
   -v, --verbose             Show concise activity logs
@@ -125,7 +125,7 @@ ${kleur.bold}Examples:${kleur.reset}
   bun run bin.ts -v --protocol vless,ss --exit us,de https://.../sub.yaml
   bun run bin.ts -s -v config.json
   bun run bin.ts -m -v xray.json -o mihomo.yaml
-  bun run bin.ts -s -v -e
+  bun run bin.ts -s --bin ./bin/sing-box -v -e
 `);
   process.exit(0);
 }
@@ -180,14 +180,20 @@ function parseArgs(args: string[]): void {
     if (arg === "-p" || arg === "--protocol") {
       const val = readValue(arg);
       options.protocols.push(
-        ...val.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)
+        ...val
+          .split(",")
+          .map((s) => s.trim().toLowerCase())
+          .filter(Boolean),
       );
       continue;
     }
     if (arg.startsWith("--protocol=")) {
       const val = arg.slice("--protocol=".length);
       options.protocols.push(
-        ...val.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)
+        ...val
+          .split(",")
+          .map((s) => s.trim().toLowerCase())
+          .filter(Boolean),
       );
       continue;
     }
@@ -195,14 +201,20 @@ function parseArgs(args: string[]): void {
     if (arg === "-E" || arg === "--exit") {
       const val = readValue(arg);
       options.exitCountries.push(
-        ...val.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)
+        ...val
+          .split(",")
+          .map((s) => s.trim().toLowerCase())
+          .filter(Boolean),
       );
       continue;
     }
     if (arg.startsWith("--exit=")) {
       const val = arg.slice("--exit=".length);
       options.exitCountries.push(
-        ...val.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)
+        ...val
+          .split(",")
+          .map((s) => s.trim().toLowerCase())
+          .filter(Boolean),
       );
       continue;
     }
@@ -243,6 +255,16 @@ function parseArgs(args: string[]): void {
         ? arg.slice("--timeout=".length)
         : arg.slice("-t=".length);
       options.timeout = parsePositiveInteger(val, "Timeout");
+      continue;
+    }
+
+    if (arg === "--bin") {
+      options.bin = readValue(arg);
+      continue;
+    }
+    if (arg.startsWith("--bin=")) {
+      options.bin = arg.slice("--bin=".length);
+      if (!options.bin) throw new Error("Missing binary path after --bin");
       continue;
     }
 
@@ -298,6 +320,21 @@ try {
 }
 
 function resolveBinary(mode: Mode): string {
+  if (options.bin) {
+    // Resolve explicit filesystem paths relative to the current directory.
+    // Bare command names are left for PATH lookup by the process launcher.
+    const isFilesystemPath =
+      options.bin.includes("/") ||
+      options.bin.startsWith(".") ||
+      existsSync(options.bin);
+    const customBinary = isFilesystemPath ? resolve(options.bin) : options.bin;
+
+    if (isFilesystemPath && !existsSync(customBinary)) {
+      throw new Error(`Binary not found: ${customBinary}`);
+    }
+    return customBinary;
+  }
+
   const candidates =
     mode === "xray"
       ? ["xray"]
@@ -306,7 +343,10 @@ function resolveBinary(mode: Mode): string {
         : ["sbx", "sing-box"];
   for (const name of candidates) {
     try {
-      const r = Bun.spawnSync(["which", name], { stdout: "pipe", stderr: "pipe" });
+      const r = Bun.spawnSync(["which", name], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
       if (r.exitCode === 0) return name;
     } catch {}
   }
@@ -487,7 +527,10 @@ function buildSingBoxTls(outbound: AnyObject): AnyObject | undefined {
     insecure: nodeInsecure(outbound),
   };
   if (outbound.fp || outbound.fingerprint) {
-    tls.utls = { enabled: true, fingerprint: outbound.fp || outbound.fingerprint };
+    tls.utls = {
+      enabled: true,
+      fingerprint: outbound.fp || outbound.fingerprint,
+    };
   }
   const isReality =
     security === "reality" ||
@@ -560,7 +603,8 @@ function formatSingBoxOutbound(outbound: AnyObject): AnyObject {
   if (outbound.flow) formatted.flow = outbound.flow;
 
   if (type === "vmess") {
-    formatted.security = outbound.cipher || outbound.security || outbound.scy || "auto";
+    formatted.security =
+      outbound.cipher || outbound.security || outbound.scy || "auto";
     if (outbound.alterId !== undefined || outbound.alter_id !== undefined) {
       formatted.alter_id = Number(outbound.alterId ?? outbound.alter_id ?? 0);
     }
@@ -576,7 +620,8 @@ function formatSingBoxOutbound(outbound: AnyObject): AnyObject {
     const up = outbound.up_mbps ?? outbound.up ?? outbound["up-mbps"];
     const down = outbound.down_mbps ?? outbound.down ?? outbound["down-mbps"];
     if (up != null && up !== "") formatted.up_mbps = Number(up) || undefined;
-    if (down != null && down !== "") formatted.down_mbps = Number(down) || undefined;
+    if (down != null && down !== "")
+      formatted.down_mbps = Number(down) || undefined;
     if (outbound.ports) formatted.ports = outbound.ports;
     if (outbound.obfs) {
       if (typeof outbound.obfs === "object") {
@@ -600,10 +645,14 @@ function formatSingBoxOutbound(outbound: AnyObject): AnyObject {
       outbound.congestion;
     if (cc) formatted.congestion_control = cc;
     const relay =
-      outbound.udp_relay_mode || outbound["udp-relay-mode"] || outbound.udpRelayMode;
+      outbound.udp_relay_mode ||
+      outbound["udp-relay-mode"] ||
+      outbound.udpRelayMode;
     if (relay) formatted.udp_relay_mode = relay;
     const zrtt =
-      outbound.zero_rtt_handshake ?? outbound["reduce-rtt"] ?? outbound.reduce_rtt;
+      outbound.zero_rtt_handshake ??
+      outbound["reduce-rtt"] ??
+      outbound.reduce_rtt;
     if (zrtt !== undefined) formatted.zero_rtt_handshake = Boolean(zrtt);
     if (outbound.heartbeat != null) formatted.heartbeat = outbound.heartbeat;
   }
@@ -795,7 +844,10 @@ function unquoteYamlScalar(raw: string): unknown {
     for (const part of inner.split(",")) {
       const idx = part.indexOf(":");
       if (idx < 0) continue;
-      const k = part.slice(0, idx).trim().replace(/^["']|["']$/g, "");
+      const k = part
+        .slice(0, idx)
+        .trim()
+        .replace(/^["']|["']$/g, "");
       const v = unquoteYamlScalar(part.slice(idx + 1));
       obj[k] = v;
     }
@@ -841,13 +893,20 @@ function parseMihomoYamlProxies(yamlContent: string): AnyObject[] {
 
     const ind = indentOf(line);
 
-    if (ind <= proxiesIndent && !trimmed.startsWith("-") && /^[A-Za-z0-9_-]+:/.test(trimmed)) {
+    if (
+      ind <= proxiesIndent &&
+      !trimmed.startsWith("-") &&
+      /^[A-Za-z0-9_-]+:/.test(trimmed)
+    ) {
       flushProxy();
       inProxiesSection = false;
       continue;
     }
 
-    if (trimmed.startsWith("-") && (proxiesIndent < 0 || ind <= proxiesIndent + 2)) {
+    if (
+      trimmed.startsWith("-") &&
+      (proxiesIndent < 0 || ind <= proxiesIndent + 2)
+    ) {
       flushProxy();
       currentProxy = {};
       nestStack.length = 0;
@@ -875,7 +934,10 @@ function parseMihomoYamlProxies(yamlContent: string): AnyObject[] {
     const key = trimmed.slice(0, colonIdx).trim();
     const rawVal = trimmed.slice(colonIdx + 1).trim();
 
-    while (nestStack.length > 1 && ind < nestStack[nestStack.length - 1].indent) {
+    while (
+      nestStack.length > 1 &&
+      ind < nestStack[nestStack.length - 1].indent
+    ) {
       nestStack.pop();
     }
 
@@ -1038,7 +1100,11 @@ async function loadInputs(): Promise<{
   log.step(`load ${options.inputs.length} source(s)`);
   for (let i = 0; i < options.inputs.length; i++) {
     const input = options.inputs[i];
-    log.info(`[${i + 1}/${options.inputs.length}] ${input}`);
+    const sourceLinkStart = rawLinks.length;
+    const sourceObjectStart = mihomoObjects.length;
+    log.info(
+      `${kleur.bold}[${i + 1}/${options.inputs.length}]${kleur.reset} ${input}`,
+    );
 
     let rawContent = "";
     if (/^https?:\/\//i.test(input)) {
@@ -1059,14 +1125,19 @@ async function loadInputs(): Promise<{
       (rawContent.includes("proxies:") && !looksLikeJson(rawContent, input));
 
     const isJson = !isYaml && looksLikeJson(rawContent, input);
+    const inputFormat = isYaml ? "YAML" : isJson ? "JSON" : "subscription/text";
+    const formatLabel = `${kleur.cyan}${inputFormat}${kleur.reset}`;
+    log.info(
+      `format: ${formatLabel}${/^https?:\/\//i.test(input) ? " (remote)" : " (local)"}`,
+    );
 
     if (isYaml) {
       const parsed = parseMihomoYamlProxies(rawContent);
-      log.verbose(`yaml proxies extracted: ${parsed.length}`);
+      log.verbose(`YAML parser extracted ${parsed.length} proxy object(s)`);
       mihomoObjects.push(...parsed);
     } else if (isJson) {
       const parsed = parseJsonProxies(rawContent);
-      log.verbose(`json proxies extracted: ${parsed.length}`);
+      log.verbose(`JSON parser extracted ${parsed.length} proxy object(s)`);
       mihomoObjects.push(...parsed);
     } else {
       const lines = rawContent
@@ -1137,10 +1208,16 @@ async function loadInputs(): Promise<{
         }
       }
     }
+
+    const sourceObjectsAdded = mihomoObjects.length - sourceObjectStart;
+    const sourceLinksAdded = rawLinks.length - sourceLinkStart;
+    log.ok(
+      `source loaded  ${kleur.cyan}YAML/JSON=${sourceObjectsAdded}${kleur.reset}  ${kleur.cyan}links=${sourceLinksAdded}${kleur.reset}`,
+    );
   }
 
   log.ok(
-    `loaded  yaml/json=${mihomoObjects.length}  links=${rawLinks.length}`,
+    `all sources loaded  ${kleur.bold}YAML/JSON=${mihomoObjects.length}${kleur.reset}  ${kleur.bold}links=${rawLinks.length}${kleur.reset}`,
   );
   return { rawLinks, mihomoObjects };
 }
@@ -1529,7 +1606,8 @@ function buildVless(data: AnyObject | URL, tag: string): AnyObject | null {
         outbound["reality-opts"] = { "public-key": pbk, "short-id": sid };
         if (fp) outbound["client-fingerprint"] = fp;
       }
-      if (insecure !== undefined) outbound["skip-cert-verify"] = insecure !== false;
+      if (insecure !== undefined)
+        outbound["skip-cert-verify"] = insecure !== false;
     }
     return outbound;
   }
@@ -1587,7 +1665,8 @@ function buildHysteria2(data: AnyObject | URL, tag: string): AnyObject | null {
     up = params.get("up") || params.get("upmbps") || undefined;
     down = params.get("down") || params.get("downmbps") || undefined;
     obfs = params.get("obfs") || undefined;
-    obfsPassword = params.get("obfs-password") || params.get("obfs_password") || undefined;
+    obfsPassword =
+      params.get("obfs-password") || params.get("obfs_password") || undefined;
     const alpnParam = params.get("alpn");
     if (alpnParam) alpn = alpnParam.split(",");
     ports = params.get("mport") || params.get("ports") || undefined;
@@ -1605,7 +1684,10 @@ function buildHysteria2(data: AnyObject | URL, tag: string): AnyObject | null {
     } else {
       obfs = data.obfs || undefined;
       obfsPassword =
-        data["obfs-password"] || data.obfs_password || data.obfsPassword || undefined;
+        data["obfs-password"] ||
+        data.obfs_password ||
+        data.obfsPassword ||
+        undefined;
     }
     alpn = data.alpn;
     ports = data.ports || data.mport || undefined;
@@ -1637,8 +1719,10 @@ function buildHysteria2(data: AnyObject | URL, tag: string): AnyObject | null {
     }
     if (down != null && down !== "") {
       const n = Number(down);
-      if (options.mode === "mihomo") outbound.down = Number.isFinite(n) ? n : down;
-      else outbound.down_mbps = Number.isFinite(n) ? n : Number(down) || undefined;
+      if (options.mode === "mihomo")
+        outbound.down = Number.isFinite(n) ? n : down;
+      else
+        outbound.down_mbps = Number.isFinite(n) ? n : Number(down) || undefined;
     }
     if (obfs) {
       if (options.mode === "mihomo") {
@@ -1689,7 +1773,10 @@ function buildTuic(data: AnyObject | URL, tag: string): AnyObject | null {
     const params = data.searchParams;
     password = params.get("password") || "";
     sni = params.get("sni") || server;
-    if (params.get("insecure") === "1" || params.get("allow_insecure") === "1") {
+    if (
+      params.get("insecure") === "1" ||
+      params.get("allow_insecure") === "1"
+    ) {
       insecure = true;
     }
     congestion =
@@ -1717,7 +1804,10 @@ function buildTuic(data: AnyObject | URL, tag: string): AnyObject | null {
       data.congestion ||
       undefined;
     udpRelayMode =
-      data.udp_relay_mode || data["udp-relay-mode"] || data.udpRelayMode || undefined;
+      data.udp_relay_mode ||
+      data["udp-relay-mode"] ||
+      data.udpRelayMode ||
+      undefined;
     alpn = data.alpn;
     zeroRtt =
       data.zero_rtt_handshake ??
@@ -2217,6 +2307,8 @@ async function locateProxies(proxies: AnyObject[]): Promise<AnyObject[]> {
       );
       const progress = `[${index + 1}/${total}]`;
 
+      log.verbose(`${progress} testing ${workTag}`);
+
       try {
         const country = await detectExitCountry(outbound);
         if (stop) return;
@@ -2235,9 +2327,14 @@ async function locateProxies(proxies: AnyObject[]): Promise<AnyObject[]> {
         outbound._country = country;
 
         const latency =
-          outbound._latencyMs != null ? `  ${outbound._latencyMs}ms` : "";
+          outbound._latencyMs != null
+            ? `${outbound._latencyMs}ms`
+            : "latency n/a";
         log.ok(
-          `${progress} ${workTag}  ->  ${kleur.green}${newTag}${kleur.reset} (${country})${latency}`,
+          `${progress} ${workTag}  ->  ${kleur.dim}(${country})${kleur.reset} ${kleur.green}${newTag}${kleur.reset}  ${kleur.dim}${latency}${kleur.reset}`,
+        );
+        log.verbose(
+          `${progress} accepted ${workTag}; exit=${country}; latency=${latency}`,
         );
         located.push(outbound);
 
@@ -2245,8 +2342,11 @@ async function locateProxies(proxies: AnyObject[]): Promise<AnyObject[]> {
           stop = true;
           return;
         }
-      } catch {
+      } catch (err) {
         failedCount++;
+        log.verbose(
+          `${progress} unexpected error for ${workTag}: ${(err as Error).message}`,
+        );
       }
     }
   }
@@ -2263,9 +2363,13 @@ async function locateProxies(proxies: AnyObject[]): Promise<AnyObject[]> {
     located.length = options.limit;
   }
 
+  const skipped = Math.max(0, total - located.length - failedCount);
   log.ok(`alive ${located.length}/${total}`);
   if (failedCount > 0) {
-    log.warn(`dead  ${failedCount}/${total}`);
+    log.warn(`failed ${failedCount}/${total}`);
+  }
+  if (skipped > 0) {
+    log.info(`not tested / skipped ${skipped}/${total}`);
   }
 
   return located;
@@ -2313,7 +2417,9 @@ function stripInternal(obj: AnyObject): AnyObject {
 }
 
 function generateSingBoxConfig(proxies: AnyObject[]): AnyObject {
-  const formattedProxies = proxies.map((p) => stripInternal(formatSingBoxOutbound(p)));
+  const formattedProxies = proxies.map((p) =>
+    stripInternal(formatSingBoxOutbound(p)),
+  );
   const tags = formattedProxies.map((proxy) => proxy.tag);
 
   return {
@@ -2375,10 +2481,7 @@ function generateSingBoxConfig(proxies: AnyObject[]): AnyObject {
         server: "direct-dns",
         strategy: "prefer_ipv4",
       },
-      rules: [
-        { action: "sniff" },
-        { protocol: "dns", action: "hijack-dns" },
-      ],
+      rules: [{ action: "sniff" }, { protocol: "dns", action: "hijack-dns" }],
       final: "Selector",
     },
   };
@@ -2558,7 +2661,9 @@ async function main(): Promise<void> {
   log.ok(`unique ${kleur.bold}${proxies.length}${kleur.reset}`);
 
   if (proxies.length === 0) {
-    throw new Error("No supported proxy links or YAML/JSON proxies were found.");
+    throw new Error(
+      "No supported proxy links or YAML/JSON proxies were found.",
+    );
   }
 
   // Filter before test: Protocol filter (supporting 'ss' and 'shadowsocks' interchangeably)
@@ -2566,7 +2671,8 @@ async function main(): Promise<void> {
     const before = proxies.length;
     proxies = proxies.filter((p) => {
       const t = String(p.type || "").toLowerCase();
-      const normalized = t === "ss" ? "shadowsocks" : t === "hy2" ? "hysteria2" : t;
+      const normalized =
+        t === "ss" ? "shadowsocks" : t === "hy2" ? "hysteria2" : t;
       return (
         options.protocols.includes(t) ||
         options.protocols.includes(normalized) ||
@@ -2574,7 +2680,9 @@ async function main(): Promise<void> {
         (options.protocols.includes("shadowsocks") && normalized === "ss")
       );
     });
-    log.info(`Filtered by protocol [${options.protocols.join(", ")}]: kept ${proxies.length}/${before} nodes`);
+    log.info(
+      `Filtered by protocol [${options.protocols.join(", ")}]: kept ${proxies.length}/${before} nodes`,
+    );
   }
 
   if (proxies.length === 0) {
@@ -2595,21 +2703,64 @@ async function main(): Promise<void> {
       const cc = String(n._country || "").toLowerCase();
       return options.exitCountries.includes(cc);
     });
-    log.info(`Filtered by tested exit country [${options.exitCountries.join(", ")}]: kept ${located.length}/${before} working nodes`);
+    log.info(
+      `Filtered by tested exit country [${options.exitCountries.join(", ")}]: kept ${located.length}/${before} working nodes`,
+    );
   }
 
   if (located.length === 0) {
-    throw new Error("No working proxies matched the requested --exit countries after testing.");
+    throw new Error(
+      "No working proxies matched the requested --exit countries after testing.",
+    );
   }
 
-  for (let i = 0; i < located.length; i++) {
-    const n = located[i];
-    const current = String(n.tag || n.name || "");
-    if (/^(proxy|vmess|vless|ss|trojan|hysteria2|hy2|tuic)\d+$/i.test(current)) {
-      const cc = String(n._country || "xx").toLowerCase();
-      applyFinalTag(n, `${cc}${i + 1}`);
-      log.verbose(`retagged leftover ${current} -> ${n.tag || n.name}`);
-    }
+  // Sort the final node list by measured latency (fastest first).
+  // Missing latency values are kept at the end; sort is stable for ties.
+  located.sort((a, b) => {
+    const latencyA = a._latencyMs ?? Number.POSITIVE_INFINITY;
+    const latencyB = b._latencyMs ?? Number.POSITIVE_INFINITY;
+    return latencyA - latencyB;
+  });
+
+  const measuredLatencies = located
+    .map((node) => node._latencyMs)
+    .filter(
+      (value): value is number =>
+        typeof value === "number" && Number.isFinite(value),
+    );
+  const missingLatencies = located.length - measuredLatencies.length;
+  if (measuredLatencies.length > 0) {
+    const sorted = [...measuredLatencies].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    log.step(
+      `latency order  fastest=${sorted[0]}ms  median=${median}ms  slowest=${sorted[sorted.length - 1]}ms` +
+        (missingLatencies > 0 ? `  unmeasured=${missingLatencies}` : ""),
+    );
+  } else {
+    log.warn(
+      `latency order unavailable; ${located.length} node(s) have no measurement`,
+    );
+  }
+
+  // Rebuild country-based tags in sorted order so tag numbering matches the
+  // final config order rather than the order in which concurrent tests finished.
+  const sortedCountryCounters = new Map<string, number>();
+  for (const n of located) {
+    const cc = String(n._country || "xx").toLowerCase();
+    const number = (sortedCountryCounters.get(cc) || 0) + 1;
+    sortedCountryCounters.set(cc, number);
+    applyFinalTag(n, `${cc}${number}`);
+  }
+
+  if (options.verbose) {
+    log.info("final proxy order (fastest first):");
+    located.forEach((node, index) => {
+      const tag = String(node.tag || node.name || `node${index + 1}`);
+      const latency = node._latencyMs == null ? "n/a" : `${node._latencyMs}ms`;
+      log.verbose(
+        `${String(index + 1).padStart(3, " ")}. ${tag.padEnd(24, " ")} ${latency}`,
+      );
+    });
   }
 
   log.step("write config");

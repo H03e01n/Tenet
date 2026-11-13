@@ -1,80 +1,78 @@
-# TENET (`bin.ts`)
+# TENET
 
-A high-performance CLI utility written in TypeScript for **Bun** that loads, parses, tests, filters, and generates routing configurations for **sing-box**, **Xray**, and **Mihomo (Clash Meta)**.
+TENET is a CLI tool that reads proxy subscriptions or configuration files, tests proxy nodes, detects their exit countries, sorts working nodes by latency, and generates a client configuration.
 
-## Features
+## Requirements
 
-* **Multi-Source Inputs**: Load subscription links, local YAML/JSON files, or remote URLs.
+- [Bun](https://bun.sh/)
+- A compatible core:
+  - sing-box (`sing-box` or `sbx`)
+  - Xray (`xray`)
+  - Mihomo (`mihomo`, `clash-meta`, or `clash`)
 
-* **Robust Parsing**: Supports YAML (Clash), JSON (sing-box outbounds, Xray outbounds, Clash proxies), and base64 share links (`vmess`, `vless`, `trojan`, `ss`/`shadowsocks`, `hysteria2`, `tuic`).
-
-* **Advanced Protocol & TLS Support**: Full parameter parsing for Hysteria2 (obfuscation, bandwidth limits, port hopping) and TUIC (congestion control, zero-RTT, UDP relay modes).
-
-* **Concurrency & Location Testing**: Tests nodes in parallel against Cloudflare to verify latency and determine real-world GeoIP exit countries.
-
-* **Smart Filtering**:
-
-  * `--protocol` (pre-test filter for protocols like `vless`, `trojan`, `ss`/`shadowsocks`, etc.)
-
-  * `--exit` (post-test filter ensuring only nodes exiting from specific countries like `us`, `de`, `nl` are kept)
-
-* **Automatic Validation & Execution**: Validates generated configurations directly against core binaries and optionally starts them immediately.
-
-## Prerequisites
-
-* [Bun](https://bun.sh/) runtime installed.
-
-* At least one core binary installed and available in your PATH:
-
-  * `sing-box` (or `sbx`)
-
-  * `xray`
-
-  * `mihomo` (or `clash-meta`)
+You can provide a custom core executable with `--bin`.
 
 ## Usage
 
-```
+```bash
 bun run bin.ts [options] <input1> [input2 ...]
-
 ```
 
-### Options
-
-| Flag | Description | Default | 
-| ----- | ----- | ----- | 
-| `-s, --sing-box` | Generate sing-box configuration | **Yes** (Port: `2080`) | 
-| `-x, --xray` | Generate Xray configuration | Port: `10808` | 
-| `-m, --mihomo` | Use Mihomo core & generate YAML config | Port: `7890` | 
-| `-p, --protocol <list>` | Filter by protocols (e.g. `vless,ss,trojan`) | All | 
-| `-E, --exit <list>` | Filter by tested exit countries (e.g. `us,de`) | All | 
-| `-n, --limit <number>` | Stop testing early once $N$ working nodes are found | Unlimited | 
-| `-c, --concurrency <n>` | Number of parallel location tests | `12` | 
-| `-t, --timeout <ms>` | Per-node connection timeout | `15000` | 
-| `-o, --output <file>` | Custom output filename (`xyz.json`, `mihomo.yaml`, etc.) | Auto based on mode | 
-| `-e, --exec` | Immediately execute the core binary with the generated config | `false` | 
-| `-v, --verbose` | Show concise activity and debug logs | `false` | 
-| `-h, --help` | Show help screen | — | 
+If no input is supplied, TENET looks for `sub.txt` in the current directory.
 
 ## Examples
 
-1. **Test a subscription URL and generate a sing-box config:**
+```bash
+# Generate a sing-box config
+bun run bin.ts -s -v sub.txt
 
-   ```
-   bun run bin.ts -s https://example.com/subscription/link
-   
-   ```
+# Generate an Xray config
+bun run bin.ts -x sub.txt -o xray.json
 
-2. **Filter only `vless` and `shadowsocks` nodes, test for US/DE exit countries, and limit to 10 nodes:**
+# Generate a Mihomo config
+bun run bin.ts -m sub.txt -o mihomo.yaml
 
-   ```
-   bun run bin.ts -s --protocol vless,ss --exit us,de --limit 10 sub.yaml
-   
-   ```
+# Filter protocols and exit countries
+bun run bin.ts -s --protocol vless,ss --exit us,de sub.txt
 
-3. **Generate a Mihomo YAML configuration and run it immediately:**
+# Use a custom sing-box binary and run the generated config
+bun run bin.ts -s --bin ./bin/sing-box --exec sub.txt
+```
 
-   ```
-   bun run bin.ts -m -v -e config.json
-   
-   ```
+## Options
+
+| Option                         | Description                                                        |
+| ------------------------------ | ------------------------------------------------------------------ |
+| `-s`, `--sing-box`             | Generate a sing-box config (default mode)                          |
+| `-x`, `--xray`                 | Generate an Xray config                                            |
+| `-m`, `--mihomo`               | Generate a Mihomo YAML config                                      |
+| `-p`, `--protocol <list>`      | Filter protocols, comma-separated (for example: `vless,ss`)        |
+| `-E`, `--exit <list>`          | Keep nodes matching detected exit countries (for example: `us,de`) |
+| `-n`, `--limit <number>`       | Stop after the requested number of working nodes                   |
+| `-c`, `--concurrency <number>` | Number of parallel proxy tests (default: `12`)                     |
+| `-o`, `--output <file>`        | Output filename                                                    |
+| `--bin <path>`                 | Use a custom core executable; accepts a path or command name       |
+| `-t`, `--timeout <ms>`         | Per-node location-test timeout                                     |
+| `-e`, `--exec`                 | Execute the selected core with the generated config                |
+| `-v`, `--verbose`              | Show detailed activity logs                                        |
+| `-h`, `--help`                 | Show help                                                          |
+
+## Supported inputs
+
+- Local files and remote URLs
+- Clash/Mihomo YAML
+- JSON containing Clash proxies, sing-box outbounds, or Xray outbounds
+- Plain or Base64-encoded subscription content
+- Proxy share links such as VMess, VLESS, Shadowsocks, Trojan, Hysteria2, and TUIC
+
+## Output and sorting
+
+TENET tests nodes concurrently, filters by detected exit country when requested, then sorts the final working nodes by measured latency (fastest first). Nodes without a latency measurement are placed last.
+
+Default output filenames:
+
+- sing-box: `xyz.json`
+- Xray: `xry.json`
+- Mihomo: `mihomo.yaml`
+
+Mihomo output is always YAML.
