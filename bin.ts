@@ -21,6 +21,7 @@ interface Options {
   timeout: number;
   verbose: boolean;
   exec: boolean;
+  base64: boolean;
   protocols: string[];
   exitCountries: string[];
 }
@@ -39,6 +40,7 @@ const options: Options = {
   timeout: DEFAULT_TIMEOUT,
   verbose: false,
   exec: false,
+  base64: false,
   protocols: [],
   exitCountries: [],
 };
@@ -63,6 +65,8 @@ const kleur = {
 };
 
 let failedCount = 0;
+const failureReasons = new Map<string, number>();
+let runStartedAt = Date.now();
 
 const log = {
   info: (msg: string) => console.log(`${kleur.cyan}  ·${kleur.reset} ${msg}`),
@@ -74,9 +78,10 @@ const log = {
   error: (msg: string) => console.log(`${kleur.red}  xx${kleur.reset} ${msg}`),
   step: (msg: string) =>
     console.log(`${kleur.bold}${kleur.cyan}==>${kleur.reset} ${msg}`),
+  dim: (msg: string) => console.log(`${kleur.gray}  .. ${msg}${kleur.reset}`),
   verbose: (msg: string) => {
     if (options.verbose) {
-      console.log(`${kleur.gray}     ${msg}${kleur.reset}`);
+      console.log(`${kleur.dim}${kleur.gray}  ··${kleur.reset} ${msg}`);
     }
   },
 };
@@ -103,14 +108,16 @@ ${kleur.bold}Usage:${kleur.reset}
 ${kleur.bold}Inputs:${kleur.reset}
   Subscription links, local files, or URLs.
   Supported: Clash/mihomo YAML, JSON (Clash proxies / sing-box outbounds /
-  Xray outbounds), base64 or plain share links (vmess/ss/trojan/vless/…).
-  Mihomo mode always writes YAML.
+  Xray outbounds), base64 or plain share links (vmess/vless/ss/trojan/
+  hysteria2/tuic). Mihomo mode always writes YAML.
+  -b writes a base64 subscription of those share links instead of a core config.
 
 ${kleur.bold}Options:${kleur.reset}
   -s, --sing-box            Generate sing-box config (default port: 2080)
   -x, --xray                Generate Xray config (default port: 10808)
   -m, --mihomo              Use Mihomo core and config (default port: 7890)
-  -p, --protocol <list>     Filter protocols before test (e.g. vless,ss)
+  -b, --base64              Write a base64 share-link subscription
+  -p, --protocol <list>     Filter protocols before test (e.g. vless,ss,hy2)
   -E, --exit <list>         Filter tested exit countries after test (e.g. us,de)
   -n, --limit <number>      Maximum successful nodes (triggers early stopping)
   -c, --concurrency <n>     Parallel tests (default: ${DEFAULT_CONCURRENCY})
@@ -118,13 +125,14 @@ ${kleur.bold}Options:${kleur.reset}
       --bin <path>          Custom core binary path (overrides auto-detection)
   -t, --timeout <ms>        Per-node location timeout
   -e, --exec                Execute the binary immediately with generated config
-  -v, --verbose             Show concise activity logs
+  -v, --verbose             Show probes, failures, progress beats, final order
   -h, --help                Show this help
 
 ${kleur.bold}Examples:${kleur.reset}
   bun run bin.ts -v --protocol vless,ss --exit us,de https://.../sub.yaml
   bun run bin.ts -s -v config.json
   bun run bin.ts -m -v xray.json -o mihomo.yaml
+  bun run bin.ts -b -s -v --protocol vless,ss -o base64.txt sub.txt
   bun run bin.ts -s --bin ./bin/sing-box -v -e
 `);
   process.exit(0);
@@ -151,6 +159,11 @@ function parseArgs(args: string[]): void {
 
     if (arg === "-e" || arg === "--exec") {
       options.exec = true;
+      continue;
+    }
+
+    if (arg === "-b" || arg === "--base64") {
+      options.base64 = true;
       continue;
     }
 
@@ -295,19 +308,20 @@ function parseArgs(args: string[]): void {
   }
 
   if (!options.output) {
-    options.output =
-      options.mode === "xray"
+    options.output = options.base64
+      ? "base64.txt"
+      : options.mode === "xray"
         ? "xry.json"
         : options.mode === "mihomo"
           ? "mihomo.yaml"
           : "xyz.json";
   }
 
-  if (options.mode === "mihomo") {
+  if (!options.base64 && options.mode === "mihomo") {
     if (!/\.(ya?ml)$/i.test(options.output)) {
       options.output = options.output.replace(/\.json$/i, "") + ".yaml";
     }
-  } else if (!/\.json$/i.test(options.output)) {
+  } else if (!options.base64 && !/\.json$/i.test(options.output)) {
     options.output = options.output.replace(/\.ya?ml$/i, "") + ".json";
   }
 }
@@ -317,6 +331,11 @@ try {
 } catch (error) {
   log.error(`Argument error: ${(error as Error).message}`);
   process.exit(1);
+}
+
+if (options.base64 && options.exec) {
+  log.warn("--exec ignored in base64 mode");
+  options.exec = false;
 }
 
 function resolveBinary(mode: Mode): string {
@@ -357,13 +376,22 @@ const binary = resolveBinary(options.mode);
 const listenPort =
   options.mode === "mihomo" ? 7890 : options.mode === "sing-box" ? 2080 : 10808;
 
-// Enhanced Startup Logging with Active Filters Display
+runStartedAt = Date.now();
 log.step(
-  `${options.mode}  binary=${binary}  port=${listenPort}  workers=${options.concurrency}` +
-    (options.limit != null ? `  limit=${options.limit}` : "") +
-    `  timeout=${options.timeout}ms`,
+  [
+    options.base64 ? `${options.mode} + base64` : options.mode,
+    `binary=${binary}`,
+    options.base64 ? "probe-only" : `port=${listenPort}`,
+    `workers=${options.concurrency}`,
+    options.limit != null ? `limit=${options.limit}` : "",
+    `timeout=${options.timeout}ms`,
+  ]
+    .filter(Boolean)
+    .join("  "),
 );
-log.info(`output ${options.output}`);
+log.info(
+  `output ${options.output}${options.base64 ? "  (base64 subscription)" : ""}`,
+);
 if (options.protocols.length > 0) {
   log.info(`filter protocol -> [${options.protocols.join(", ")}]`);
 }
@@ -377,6 +405,115 @@ if (options.exitCountries.length > 0) {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function elapsed(): string {
+  const ms = Date.now() - runStartedAt;
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.round(seconds % 60);
+  return `${minutes}m${String(rest).padStart(2, "0")}s`;
+}
+
+function paintLatency(ms: number | null | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) {
+    return `${kleur.gray}n/a${kleur.reset}`;
+  }
+  const color = ms < 200 ? kleur.green : ms < 500 ? kleur.yellow : kleur.red;
+  return `${color}${ms}ms${kleur.reset}`;
+}
+
+function nonempty(value: unknown): string | undefined {
+  if (value == null) return undefined;
+  const text = String(value).trim();
+  return text ? text : undefined;
+}
+
+function shortenReason(reason: string): string {
+  const line = reason.replace(/\s+/g, " ").trim();
+  if (!line) return "unknown error";
+  // keep fail lines on one terminal row
+  return line.length > 100 ? `${line.slice(0, 97)}...` : line;
+}
+
+function noteFailure(reason: string): void {
+  failedCount++;
+  const key = shortenReason(reason);
+  failureReasons.set(key, (failureReasons.get(key) || 0) + 1);
+}
+
+function logFailureReasons(): void {
+  if (!options.verbose || failureReasons.size === 0) return;
+  const top = [...failureReasons.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
+  log.verbose(
+    `top failures  ${kleur.yellow}${failedCount}${kleur.reset} total  ${kleur.gray}${failureReasons.size} unique${kleur.reset}`,
+  );
+  for (const [reason, count] of top) {
+    log.verbose(
+      `${kleur.bold}${kleur.yellow}${String(count).padStart(4, " ")}${kleur.reset}  ${kleur.gray}${reason}${kleur.reset}`,
+    );
+  }
+}
+
+function countBy(
+  items: AnyObject[],
+  keyFn: (item: AnyObject) => string,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    const key = keyFn(item) || "unknown";
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return counts;
+}
+
+function formatCounts(counts: Map<string, number>): string {
+  if (counts.size === 0) return "none";
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([key, n]) => `${key} ${kleur.bold}${n}${kleur.reset}`)
+    .join("   ");
+}
+
+function nodeProtocol(outbound: AnyObject): string {
+  const raw = String(outbound.type || outbound.protocol || "").toLowerCase();
+  if (raw === "shadowsocks") return "ss";
+  if (raw === "hy2") return "hysteria2";
+  return raw;
+}
+
+function protocolAliases(protocol: string): Set<string> {
+  const name = protocol.toLowerCase();
+  const aliases = new Set<string>([name]);
+  if (name === "ss" || name === "shadowsocks") {
+    aliases.add("ss");
+    aliases.add("shadowsocks");
+  }
+  if (name === "hy2" || name === "hysteria2") {
+    aliases.add("hy2");
+    aliases.add("hysteria2");
+  }
+  return aliases;
+}
+
+function protocolAllowed(outbound: AnyObject, filters: string[]): boolean {
+  const aliases = protocolAliases(nodeProtocol(outbound));
+  return filters.some((filter) => aliases.has(filter));
+}
+
+function endpointOf(outbound: AnyObject): string {
+  if (outbound.server) {
+    return `${outbound.server}:${outbound.port || outbound.server_port || "?"}`;
+  }
+  const vnext = outbound.settings?.vnext?.[0];
+  if (vnext?.address) return `${vnext.address}:${vnext.port}`;
+  const server = outbound.settings?.servers?.[0];
+  if (server?.address) return `${server.address}:${server.port}`;
+  return "?";
 }
 
 function decodeBase64(value: string): string | null {
@@ -403,8 +540,18 @@ function tryDecodeBase64Subscription(content: string): string {
   ) {
     return trimmed;
   }
+  const compact = trimmed.replace(/\s/g, "");
+  if (compact.length < 16 || !/^[A-Za-z0-9+/_-]+={0,2}$/.test(compact)) {
+    return trimmed;
+  }
   const decoded = decodeBase64(trimmed);
-  if (decoded) {
+  if (
+    decoded &&
+    (decoded.includes("://") ||
+      decoded.includes("proxies:") ||
+      decoded.startsWith("{") ||
+      decoded.startsWith("["))
+  ) {
     return decoded;
   }
   return trimmed;
@@ -742,7 +889,11 @@ function formatSingBoxOutbound(outbound: AnyObject): AnyObject {
     "auth",
   ]);
   for (const key of Object.keys(outbound)) {
-    if (!reserved.has(key) && formatted[key] === undefined) {
+    if (
+      !reserved.has(key) &&
+      formatted[key] === undefined &&
+      !key.startsWith("_")
+    ) {
       formatted[key] = outbound[key];
     }
   }
@@ -1217,7 +1368,7 @@ async function loadInputs(): Promise<{
   }
 
   log.ok(
-    `all sources loaded  ${kleur.bold}YAML/JSON=${mihomoObjects.length}${kleur.reset}  ${kleur.bold}links=${rawLinks.length}${kleur.reset}`,
+    `all sources loaded  ${kleur.bold}YAML/JSON=${mihomoObjects.length}${kleur.reset}  ${kleur.bold}links=${rawLinks.length}${kleur.reset}  ${kleur.gray}${elapsed()}${kleur.reset}`,
   );
   return { rawLinks, mihomoObjects };
 }
@@ -1771,7 +1922,7 @@ function buildTuic(data: AnyObject | URL, tag: string): AnyObject | null {
     port = validPort(data.port);
     uuid = safeDecode(data.username);
     const params = data.searchParams;
-    password = params.get("password") || "";
+    password = safeDecode(data.password) || params.get("password") || "";
     sni = params.get("sni") || server;
     if (
       params.get("insecure") === "1" ||
@@ -2212,7 +2363,7 @@ async function detectExitCountry(outbound: AnyObject): Promise<string | null> {
           },
         ],
         outbounds: [
-          { ...outbound, tag: currentTagName },
+          stripInternal({ ...outbound, tag: currentTagName }),
           { tag: "direct", protocol: "freedom" },
         ],
       };
@@ -2255,9 +2406,9 @@ async function detectExitCountry(outbound: AnyObject): Promise<string | null> {
     const body = result.stdout.replace(/\n__TIME_TOTAL__[\d.]+/, "");
     const country = body.match(/^loc=([A-Z]{2})$/m)?.[1];
     if (!country) {
-      failedCount++;
+      noteFailure("no exit country in cdn trace");
       log.verbose(
-        `[FAIL] ${outbound.tag || outbound.name || "?"}: no exit country`,
+        `${kleur.red}fail${kleur.reset} ${kleur.cyan}${nodeProtocol(outbound)}${kleur.reset} ${outbound.tag || outbound.name || "?"} ${kleur.gray}${endpointOf(outbound)}${kleur.reset} ${kleur.yellow}no exit country${kleur.reset}`,
       );
       return null;
     }
@@ -2266,9 +2417,10 @@ async function detectExitCountry(outbound: AnyObject): Promise<string | null> {
     }
     return country;
   } catch (err) {
-    failedCount++;
+    const reason = shortenReason((err as Error).message);
+    noteFailure(reason);
     log.verbose(
-      `[FAIL] ${outbound.tag || outbound.name || "?"}: ${(err as Error).message}`,
+      `${kleur.red}fail${kleur.reset} ${kleur.cyan}${nodeProtocol(outbound)}${kleur.reset} ${outbound.tag || outbound.name || "?"} ${kleur.gray}${endpointOf(outbound)}${kleur.reset} ${kleur.yellow}${reason}${kleur.reset}`,
     );
     return null;
   } finally {
@@ -2290,7 +2442,23 @@ async function locateProxies(proxies: AnyObject[]): Promise<AnyObject[]> {
   const located: AnyObject[] = [];
   let nextIndex = 0;
   let stop = false;
+  let finished = 0;
+  let sinceBeat = 0;
+  let announced = false;
   failedCount = 0;
+  failureReasons.clear();
+
+  function maybeBeat(): void {
+    if (!options.verbose) return;
+    sinceBeat++;
+    if (!announced || sinceBeat >= 6 || finished === total) {
+      log.verbose(
+        `${kleur.gray}progress${kleur.reset}  ${kleur.bold}${finished}${kleur.reset}/${total}  ${kleur.green}alive ${located.length}${kleur.reset}  ${kleur.yellow}fail ${failedCount}${kleur.reset}  ${kleur.gray}${elapsed()}${kleur.reset}`,
+      );
+      sinceBeat = 0;
+      announced = true;
+    }
+  }
 
   async function worker(): Promise<void> {
     while (!stop) {
@@ -2305,49 +2473,54 @@ async function locateProxies(proxies: AnyObject[]): Promise<AnyObject[]> {
       const workTag = String(
         outbound.tag || outbound.name || `node${index + 1}`,
       );
-      const progress = `[${index + 1}/${total}]`;
+      const progress = `[${String(index + 1).padStart(String(total).length, " ")}/${total}]`;
 
-      log.verbose(`${progress} testing ${workTag}`);
+      const proto = nodeProtocol(outbound);
+      log.verbose(
+        `${kleur.gray}${progress}${kleur.reset} ${kleur.blue}test${kleur.reset}  ${kleur.cyan}${proto}${kleur.reset}  ${workTag}  ${kleur.gray}${endpointOf(outbound)}${kleur.reset}`,
+      );
 
+      let accepted = false;
+      let workerDone = false;
       try {
         const country = await detectExitCountry(outbound);
-        if (stop) return;
-        if (!country) continue;
+        if (stop) {
+          workerDone = true;
+        } else if (country) {
+          if (options.limit !== null && located.length >= options.limit) {
+            stop = true;
+            workerDone = true;
+          } else {
+            const number = (countryCounters.get(country) || 0) + 1;
+            countryCounters.set(country, number);
 
-        if (options.limit !== null && located.length >= options.limit) {
-          stop = true;
-          return;
-        }
+            const newTag = `${country.toLowerCase()}${number}`;
+            applyFinalTag(outbound, newTag);
+            outbound._country = country;
 
-        const number = (countryCounters.get(country) || 0) + 1;
-        countryCounters.set(country, number);
+            log.ok(
+              `${progress} ${kleur.cyan}${proto}${kleur.reset}  ${kleur.green}${country}${kleur.reset}  ${paintLatency(outbound._latencyMs)}  ${kleur.gray}${endpointOf(outbound)}${kleur.reset}`,
+            );
+            located.push(outbound);
+            accepted = true;
 
-        const newTag = `${country.toLowerCase()}${number}`;
-        applyFinalTag(outbound, newTag);
-        outbound._country = country;
-
-        const latency =
-          outbound._latencyMs != null
-            ? `${outbound._latencyMs}ms`
-            : "latency n/a";
-        log.ok(
-          `${progress} ${workTag}  ->  ${kleur.dim}(${country})${kleur.reset} ${kleur.green}${newTag}${kleur.reset}  ${kleur.dim}${latency}${kleur.reset}`,
-        );
-        log.verbose(
-          `${progress} accepted ${workTag}; exit=${country}; latency=${latency}`,
-        );
-        located.push(outbound);
-
-        if (options.limit !== null && located.length >= options.limit) {
-          stop = true;
-          return;
+            if (options.limit !== null && located.length >= options.limit) {
+              stop = true;
+              workerDone = true;
+            }
+          }
         }
       } catch (err) {
-        failedCount++;
+        const reason = shortenReason((err as Error).message);
+        noteFailure(reason);
         log.verbose(
-          `${progress} unexpected error for ${workTag}: ${(err as Error).message}`,
+          `${kleur.gray}${progress}${kleur.reset} ${kleur.red}fail${kleur.reset} ${kleur.cyan}${proto}${kleur.reset} ${workTag} ${kleur.yellow}${reason}${kleur.reset}`,
         );
+      } finally {
+        finished++;
+        if (!accepted) maybeBeat();
       }
+      if (workerDone) return;
     }
   }
 
@@ -2363,16 +2536,479 @@ async function locateProxies(proxies: AnyObject[]): Promise<AnyObject[]> {
     located.length = options.limit;
   }
 
-  const skipped = Math.max(0, total - located.length - failedCount);
-  log.ok(`alive ${located.length}/${total}`);
+  const notRun = Math.max(0, total - finished);
+  const ignored = Math.max(0, finished - failedCount - located.length);
+  log.ok(`alive ${located.length}/${total}  tested ${finished}  ${elapsed()}`);
   if (failedCount > 0) {
     log.warn(`failed ${failedCount}/${total}`);
   }
-  if (skipped > 0) {
-    log.info(`not tested / skipped ${skipped}/${total}`);
+  if (notRun > 0) {
+    log.info(`not tested ${notRun}/${total}`);
   }
+  if (ignored > 0) {
+    log.info(`ignored ${ignored} late result(s) after the limit`);
+  }
+  logFailureReasons();
 
   return located;
+}
+
+
+
+// ============================================================
+// Share-link export (base64 subscription)
+// ============================================================
+
+interface ShareNode {
+  protocol: string;
+  name: string;
+  server: string;
+  port: number;
+  uuid?: string;
+  password?: string;
+  method?: string;
+  alterId?: number;
+  flow?: string;
+  network?: string;
+  path?: string;
+  host?: string;
+  serviceName?: string;
+  security?: string;
+  sni?: string;
+  fp?: string;
+  pbk?: string;
+  sid?: string;
+  insecure?: boolean;
+  alpn?: string[];
+  up?: string | number;
+  down?: string | number;
+  obfs?: string;
+  obfsPassword?: string;
+  congestion?: string;
+  udpRelayMode?: string;
+  zeroRtt?: boolean;
+  ports?: string;
+}
+
+function asStringList(value: unknown): string[] | undefined {
+  if (value == null || value === "") return undefined;
+  const items = Array.isArray(value)
+    ? value.map((item) => String(item).trim())
+    : String(value)
+        .split(",")
+        .map((item) => item.trim());
+  const filtered = items.filter(Boolean);
+  return filtered.length > 0 ? filtered : undefined;
+}
+
+function readInsecure(value: AnyObject): boolean | undefined {
+  if (value["skip-cert-verify"] === true || value.insecure === true) return true;
+  if (value["skip-cert-verify"] === false || value.insecure === false) {
+    return false;
+  }
+  return undefined;
+}
+
+function formatHost(server: string): string {
+  if (server.startsWith("[") && server.endsWith("]")) return server;
+  if (server.includes(":")) return `[${server}]`;
+  return server;
+}
+
+function encodeQuery(entries: Array<[string, unknown]>): string {
+  const parts: string[] = [];
+  for (const [key, value] of entries) {
+    if (value == null) continue;
+    const text = String(value);
+    if (!text) continue;
+    parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(text)}`);
+  }
+  return parts.join("&");
+}
+
+function withQuery(base: string, query: string, name: string): string {
+  const suffix = query ? `?${query}` : "";
+  return `${base}${suffix}#${encodeURIComponent(name)}`;
+}
+
+function describeFlatNode(
+  outbound: AnyObject,
+  protocol: string,
+  name: string,
+): ShareNode | null {
+  const server = nonempty(outbound.server);
+  const port = validPort(outbound.port || outbound.server_port);
+  if (!server || !port) return null;
+
+  const network = String(outbound.network || outbound.net || "tcp").toLowerCase();
+  const path =
+    nonempty(outbound.path) ||
+    nonempty(outbound["ws-opts"]?.path) ||
+    nonempty(outbound.ws_opts?.path);
+  const host =
+    nonempty(outbound.host) ||
+    nonempty(outbound["ws-opts"]?.headers?.Host) ||
+    nonempty(outbound["ws-opts"]?.headers?.host);
+  const serviceName =
+    nonempty(outbound.serviceName) ||
+    nonempty(outbound["grpc-opts"]?.["grpc-service-name"]) ||
+    (network === "grpc" ? path : undefined);
+  const pbk =
+    nonempty(outbound.publicKey) ||
+    nonempty(outbound["public-key"]) ||
+    nonempty(outbound.pbk) ||
+    nonempty(outbound["reality-opts"]?.["public-key"]);
+  const sid =
+    nonempty(outbound.shortId) ||
+    nonempty(outbound["short-id"]) ||
+    nonempty(outbound.sid) ||
+    nonempty(outbound["reality-opts"]?.["short-id"]);
+  const fp =
+    nonempty(outbound.fp) ||
+    nonempty(outbound.fingerprint) ||
+    nonempty(outbound["client-fingerprint"]);
+  const sni =
+    nonempty(outbound.sni) ||
+    nonempty(outbound.servername) ||
+    nonempty(outbound.peer);
+
+  let security = String(outbound.security || "").toLowerCase();
+  if (!security) {
+    if (pbk) security = "reality";
+    else if (
+      outbound.tls === true ||
+      outbound.tls === "tls" ||
+      protocol === "trojan" ||
+      protocol === "hysteria2" ||
+      protocol === "tuic"
+    ) {
+      security = "tls";
+    } else {
+      security = "none";
+    }
+  }
+
+  let obfs: string | undefined;
+  let obfsPassword: string | undefined;
+  if (typeof outbound.obfs === "object" && outbound.obfs) {
+    obfs = nonempty(outbound.obfs.type) || "salamander";
+    obfsPassword =
+      nonempty(outbound.obfs.password) || nonempty(outbound["obfs-password"]);
+  } else if (outbound.obfs) {
+    obfs = nonempty(outbound.obfs);
+    obfsPassword =
+      nonempty(outbound["obfs-password"]) ||
+      nonempty(outbound.obfs_password) ||
+      nonempty(outbound.obfsPassword);
+  }
+
+  const alterRaw = outbound.alterId ?? outbound.alter_id;
+  const zeroRaw =
+    outbound.zero_rtt_handshake ?? outbound["reduce-rtt"] ?? outbound.reduce_rtt;
+
+  return {
+    protocol,
+    name,
+    server,
+    port,
+    uuid: nonempty(outbound.uuid) || nonempty(outbound.id),
+    password: nonempty(outbound.password) || nonempty(outbound.auth),
+    method:
+      nonempty(outbound.method) ||
+      nonempty(outbound.cipher) ||
+      nonempty(outbound.scy),
+    alterId:
+      alterRaw == null || alterRaw === "" ? undefined : Number(alterRaw) || 0,
+    flow: nonempty(outbound.flow),
+    network,
+    path,
+    host,
+    serviceName,
+    security,
+    sni,
+    fp,
+    pbk,
+    sid,
+    insecure: readInsecure(outbound),
+    alpn: asStringList(outbound.alpn),
+    up: outbound.up ?? outbound.up_mbps ?? outbound["up-mbps"],
+    down: outbound.down ?? outbound.down_mbps ?? outbound["down-mbps"],
+    obfs,
+    obfsPassword,
+    congestion:
+      nonempty(outbound.congestion_control) ||
+      nonempty(outbound["congestion-controller"]) ||
+      nonempty(outbound.congestion),
+    udpRelayMode:
+      nonempty(outbound.udp_relay_mode) ||
+      nonempty(outbound["udp-relay-mode"]) ||
+      nonempty(outbound.udpRelayMode),
+    zeroRtt: zeroRaw == null ? undefined : Boolean(zeroRaw),
+    ports: nonempty(outbound.ports) || nonempty(outbound.mport),
+  };
+}
+
+function describeXrayNode(
+  outbound: AnyObject,
+  protocol: string,
+  name: string,
+): ShareNode | null {
+  const settings = outbound.settings || {};
+  const stream = outbound.streamSettings || {};
+  let server = "";
+  let port: number | null = null;
+  let uuid: string | undefined;
+  let password: string | undefined;
+  let method: string | undefined;
+  let alterId: number | undefined;
+  let flow: string | undefined;
+
+  if (protocol === "vmess" || protocol === "vless") {
+    const hop = settings.vnext?.[0];
+    if (!hop) return null;
+    server = String(hop.address || "");
+    port = validPort(hop.port);
+    const user = hop.users?.[0] || {};
+    uuid = nonempty(user.id);
+    method = nonempty(user.security);
+    flow = nonempty(user.flow);
+    if (user.alterId != null) alterId = Number(user.alterId) || 0;
+  } else if (protocol === "trojan" || protocol === "ss") {
+    const hop = settings.servers?.[0];
+    if (!hop) return null;
+    server = String(hop.address || "");
+    port = validPort(hop.port);
+    password = nonempty(hop.password);
+    method = nonempty(hop.method) || nonempty(hop.cipher);
+  } else {
+    return null;
+  }
+
+  if (!server || !port) return null;
+
+  const network = String(stream.network || "tcp").toLowerCase();
+  const tls = stream.tlsSettings || {};
+  const reality = stream.realitySettings || {};
+  const ws = stream.wsSettings || {};
+  const grpc = stream.grpcSettings || {};
+  const security = String(stream.security || "none").toLowerCase();
+  const path = nonempty(ws.path);
+  const serviceName = nonempty(grpc.serviceName);
+
+  return {
+    protocol,
+    name,
+    server,
+    port,
+    uuid,
+    password,
+    method,
+    alterId,
+    flow,
+    network,
+    path: network === "grpc" ? serviceName || path : path,
+    host: nonempty(ws.headers?.Host) || nonempty(ws.headers?.host),
+    serviceName,
+    security,
+    sni: nonempty(reality.serverName) || nonempty(tls.serverName),
+    fp: nonempty(reality.fingerprint) || nonempty(tls.fingerprint),
+    pbk: nonempty(reality.publicKey),
+    sid: nonempty(reality.shortId),
+    insecure:
+      tls.allowInsecure === true
+        ? true
+        : tls.allowInsecure === false
+          ? false
+          : undefined,
+    alpn: asStringList(tls.alpn),
+  };
+}
+
+function describeNode(outbound: AnyObject): ShareNode | null {
+  const protocol = nodeProtocol(outbound);
+  if (!protocol) return null;
+  const name = String(outbound.tag || outbound.name || protocol);
+  if (outbound.settings || outbound.streamSettings) {
+    return describeXrayNode(outbound, protocol, name);
+  }
+  return describeFlatNode(outbound, protocol, name);
+}
+
+function toShareLink(info: ShareNode | null): string | null {
+  if (!info) return null;
+  const host = formatHost(info.server);
+  const name = info.name || info.protocol;
+
+  if (info.protocol === "vmess") {
+    if (!info.uuid) return null;
+    const payload: AnyObject = {
+      v: "2",
+      ps: name,
+      add: info.server,
+      port: String(info.port),
+      id: info.uuid,
+      aid: String(info.alterId ?? 0),
+      scy: info.method || "auto",
+      net: info.network || "tcp",
+      type: "none",
+      host: info.host || "",
+      path:
+        info.network === "grpc"
+          ? info.serviceName || info.path || ""
+          : info.path || "",
+      tls: info.security === "tls" || info.security === "reality" ? "tls" : "",
+      sni: info.sni || "",
+      fp: info.fp || "",
+    };
+    return `vmess://${Buffer.from(JSON.stringify(payload)).toString("base64")}`;
+  }
+
+  if (info.protocol === "vless") {
+    if (!info.uuid) return null;
+    const query = encodeQuery([
+      ["encryption", "none"],
+      ["security", info.security || "none"],
+      [
+        "type",
+        info.network && info.network !== "tcp" ? info.network : undefined,
+      ],
+      ["sni", info.sni],
+      ["fp", info.fp],
+      ["pbk", info.pbk],
+      ["sid", info.sid],
+      ["flow", info.flow],
+      ["host", info.host],
+      [
+        "path",
+        info.network === "grpc"
+          ? undefined
+          : info.path && info.path !== "/"
+            ? info.path
+            : info.network === "ws"
+              ? info.path || "/"
+              : undefined,
+      ],
+      [
+        "serviceName",
+        info.network === "grpc" ? info.serviceName || info.path : undefined,
+      ],
+      ["alpn", info.alpn?.join(",")],
+      ["allowInsecure", info.insecure ? "1" : undefined],
+    ]);
+    return withQuery(
+      `vless://${encodeURIComponent(info.uuid)}@${host}:${info.port}`,
+      query,
+      name,
+    );
+  }
+
+  if (info.protocol === "trojan") {
+    if (!info.password) return null;
+    const security = info.pbk ? "reality" : info.security || "tls";
+    const query = encodeQuery([
+      ["security", security],
+      ["sni", info.sni],
+      ["fp", info.fp],
+      [
+        "type",
+        info.network && info.network !== "tcp" ? info.network : undefined,
+      ],
+      ["host", info.host],
+      [
+        "path",
+        info.network === "grpc"
+          ? undefined
+          : info.path && (info.network !== "tcp" || info.path !== "/")
+            ? info.path
+            : undefined,
+      ],
+      [
+        "serviceName",
+        info.network === "grpc" ? info.serviceName || info.path : undefined,
+      ],
+      ["pbk", info.pbk],
+      ["sid", info.sid],
+      ["alpn", info.alpn?.join(",")],
+      ["allowInsecure", info.insecure ? "1" : undefined],
+    ]);
+    return withQuery(
+      `trojan://${encodeURIComponent(info.password)}@${host}:${info.port}`,
+      query,
+      name,
+    );
+  }
+
+  if (info.protocol === "ss") {
+    if (!info.method || info.password == null) return null;
+    const userinfo = Buffer.from(`${info.method}:${info.password}`).toString(
+      "base64url",
+    );
+    return `ss://${userinfo}@${host}:${info.port}#${encodeURIComponent(name)}`;
+  }
+
+  if (info.protocol === "hysteria2") {
+    if (!info.password) return null;
+    const query = encodeQuery([
+      ["sni", info.sni],
+      ["insecure", info.insecure ? "1" : undefined],
+      ["obfs", info.obfs],
+      ["obfs-password", info.obfsPassword],
+      ["alpn", info.alpn?.join(",")],
+      ["up", info.up],
+      ["down", info.down],
+      ["mport", info.ports],
+    ]);
+    return withQuery(
+      `hysteria2://${encodeURIComponent(info.password)}@${host}:${info.port}`,
+      query,
+      name,
+    );
+  }
+
+  if (info.protocol === "tuic") {
+    if (!info.uuid) return null;
+    const query = encodeQuery([
+      ["password", info.password],
+      ["sni", info.sni],
+      ["insecure", info.insecure ? "1" : undefined],
+      ["congestion_control", info.congestion],
+      ["udp_relay_mode", info.udpRelayMode],
+      ["alpn", info.alpn?.join(",")],
+      ["reduce_rtt", info.zeroRtt ? "1" : undefined],
+    ]);
+    return withQuery(
+      `tuic://${encodeURIComponent(info.uuid)}@${host}:${info.port}`,
+      query,
+      name,
+    );
+  }
+
+  return null;
+}
+
+function buildShareLinks(nodes: AnyObject[]): string[] {
+  const links: string[] = [];
+  let skipped = 0;
+  for (const node of nodes) {
+    const link = toShareLink(describeNode(node));
+    if (!link) {
+      skipped++;
+      log.verbose(
+        `no share link for ${node.tag || node.name || "?"} (${nodeProtocol(node) || "unknown"})`,
+      );
+      continue;
+    }
+    links.push(link);
+  }
+  if (skipped > 0) log.warn(`share link skipped ${skipped}/${nodes.length}`);
+  if (links.length === 0) {
+    throw new Error("No share links could be built from the working nodes.");
+  }
+  return links;
+}
+
+function encodeSubscription(links: string[]): string {
+  return Buffer.from(links.join("\n")).toString("base64");
 }
 
 // ============================================================
@@ -2488,7 +3124,8 @@ function generateSingBoxConfig(proxies: AnyObject[]): AnyObject {
 }
 
 function generateXrayConfig(proxies: AnyObject[]): AnyObject {
-  const tags = proxies.map((proxy) => proxy.tag);
+  const clean = proxies.map((proxy) => stripInternal(proxy));
+  const tags = clean.map((proxy) => proxy.tag);
 
   return {
     log: { loglevel: "info" },
@@ -2506,7 +3143,7 @@ function generateXrayConfig(proxies: AnyObject[]): AnyObject {
       },
     ],
     outbounds: [
-      ...proxies,
+      ...clean,
       { tag: "direct", protocol: "freedom" },
       { tag: "block", protocol: "blackhole" },
     ],
@@ -2649,6 +3286,28 @@ async function writeConfig(config: AnyObject): Promise<void> {
   }
 }
 
+async function writeBase64Subscription(links: string[]): Promise<void> {
+  const outputPath = resolve(options.output);
+  const outputDir = dirname(outputPath);
+  if (!existsSync(outputDir)) {
+    throw new Error(`Output directory does not exist: ${outputDir}`);
+  }
+
+  const encoded = encodeSubscription(links);
+  const tempDir = mkdtempSync(join(outputDir, ".proxy-config-"));
+  const tempPath = join(tempDir, "subscription.txt");
+  try {
+    await Bun.write(tempPath, `${encoded}\n`);
+    renameSync(tempPath, outputPath);
+    log.ok(`saved ${outputPath}`);
+    log.info(
+      `base64 subscription  links=${links.length}  chars=${encoded.length}`,
+    );
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 // ============================================================
 // Main Execution
 // ============================================================
@@ -2658,7 +3317,10 @@ async function main(): Promise<void> {
 
   log.step("parse");
   let proxies = parseProxies(rawLinks, mihomoObjects);
-  log.ok(`unique ${kleur.bold}${proxies.length}${kleur.reset}`);
+  log.ok(`unique ${kleur.bold}${proxies.length}${kleur.reset}  ${elapsed()}`);
+  if (proxies.length > 0) {
+    log.info(`protocols  ${formatCounts(countBy(proxies, nodeProtocol))}`);
+  }
 
   if (proxies.length === 0) {
     throw new Error(
@@ -2669,25 +3331,31 @@ async function main(): Promise<void> {
   // Filter before test: Protocol filter (supporting 'ss' and 'shadowsocks' interchangeably)
   if (options.protocols.length > 0) {
     const before = proxies.length;
-    proxies = proxies.filter((p) => {
-      const t = String(p.type || "").toLowerCase();
-      const normalized =
-        t === "ss" ? "shadowsocks" : t === "hy2" ? "hysteria2" : t;
-      return (
-        options.protocols.includes(t) ||
-        options.protocols.includes(normalized) ||
-        (options.protocols.includes("ss") && normalized === "shadowsocks") ||
-        (options.protocols.includes("shadowsocks") && normalized === "ss")
-      );
-    });
+    proxies = proxies.filter((proxy) =>
+      protocolAllowed(proxy, options.protocols),
+    );
     log.info(
-      `Filtered by protocol [${options.protocols.join(", ")}]: kept ${proxies.length}/${before} nodes`,
+      `protocol [${options.protocols.join(", ")}]  kept ${proxies.length}/${before}`,
     );
   }
 
   if (proxies.length === 0) {
     throw new Error("All proxies were filtered out by --protocol filters.");
   }
+
+  // Test largest protocol groups first (by node count).
+  const protocolTotals = countBy(proxies, nodeProtocol);
+  proxies.sort((a, b) => {
+    const pa = nodeProtocol(a);
+    const pb = nodeProtocol(b);
+    const ca = protocolTotals.get(pa) || 0;
+    const cb = protocolTotals.get(pb) || 0;
+    if (ca !== cb) return cb - ca;
+    return pa.localeCompare(pb);
+  });
+  log.verbose(
+    `test order  ${formatCounts(protocolTotals)}`,
+  );
 
   // Run location tests on surviving nodes to discover real exit countries
   let located = await locateProxies(proxies);
@@ -2704,7 +3372,7 @@ async function main(): Promise<void> {
       return options.exitCountries.includes(cc);
     });
     log.info(
-      `Filtered by tested exit country [${options.exitCountries.join(", ")}]: kept ${located.length}/${before} working nodes`,
+      `exit [${options.exitCountries.join(", ")}]  kept ${located.length}/${before}`,
     );
   }
 
@@ -2753,30 +3421,59 @@ async function main(): Promise<void> {
   }
 
   if (options.verbose) {
-    log.info("final proxy order (fastest first):");
+    log.verbose(`${kleur.bold}final order${kleur.reset} ${kleur.gray}(fastest first)${kleur.reset}`);
     located.forEach((node, index) => {
       const tag = String(node.tag || node.name || `node${index + 1}`);
-      const latency = node._latencyMs == null ? "n/a" : `${node._latencyMs}ms`;
+      const country = String(node._country || "??");
+      const latency =
+        node._latencyMs == null
+          ? `${kleur.gray}n/a${kleur.reset}`
+          : paintLatency(node._latencyMs);
       log.verbose(
-        `${String(index + 1).padStart(3, " ")}. ${tag.padEnd(24, " ")} ${latency}`,
+        `${kleur.gray}${String(index + 1).padStart(3, " ")}.${kleur.reset} ${kleur.cyan}${nodeProtocol(node)}${kleur.reset}  ${kleur.green}${tag}${kleur.reset}  ${kleur.magenta}${country}${kleur.reset}  ${latency}  ${kleur.gray}${endpointOf(node)}${kleur.reset}`,
       );
     });
   }
 
-  log.step("write config");
-  const config =
-    options.mode === "sing-box"
-      ? generateSingBoxConfig(located)
-      : options.mode === "mihomo"
-        ? generateMihomoConfig(located)
-        : generateXrayConfig(located);
+  log.step(`summary  ${elapsed()}`);
+  log.info(`protocols  ${formatCounts(countBy(located, nodeProtocol))}`);
+  log.info(
+    `countries  ${formatCounts(countBy(located, (node) => String(node._country || "??").toLowerCase()))}`,
+  );
 
-  await writeConfig(config);
+  if (options.base64) {
+    log.step("write base64 subscription");
+    const links = buildShareLinks(located);
+    const linkCounts = new Map<string, number>();
+    for (const link of links) {
+      const scheme = link.slice(0, link.indexOf("://")) || "unknown";
+      linkCounts.set(scheme, (linkCounts.get(scheme) || 0) + 1);
+    }
+    log.info(`links  ${formatCounts(linkCounts)}`);
+    await writeBase64Subscription(links);
+  } else {
+    log.step("write config");
+    const config =
+      options.mode === "sing-box"
+        ? generateSingBoxConfig(located)
+        : options.mode === "mihomo"
+          ? generateMihomoConfig(located)
+          : generateXrayConfig(located);
+
+    await writeConfig(config);
+  }
 
   console.log("");
   log.ok(
-    `done  nodes=${located.length}  file=${kleur.bold}${resolve(options.output)}${kleur.reset}`,
+    `done  nodes=${located.length}  ${elapsed()}  file=${kleur.bold}${resolve(options.output)}${kleur.reset}`,
   );
+
+  if (options.base64) {
+    log.info(
+      "import the file as a base64 subscription (vless, vmess, ss, trojan, hysteria2, tuic)",
+    );
+    return;
+  }
 
   if (options.exec) {
     const outputAbsPath = resolve(options.output);
